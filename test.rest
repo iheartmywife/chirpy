@@ -1,6 +1,7 @@
-POST http://localhost:8080/api/validate_chirp
+POST http://localhost:8080/api/users
 Content-Type: application/json
 
 {
-  "body": "kerfuffle Item"
+  "email": "user3@example.com"
 }
+//the db wont add duplicate users so each new test requires a different user email made.

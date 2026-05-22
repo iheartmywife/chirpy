@@ -9,7 +9,9 @@ import (
 	"os"
 	"strings"
 	"sync/atomic"
+	"time"
 
+	"github.com/google/uuid"
 	"github.com/iheartmywife/chirpy/internal/database"
 	"github.com/joho/godotenv"
 	_ "github.com/lib/pq"
@@ -18,6 +20,7 @@ import (
 type apiConfig struct {
 	fileserverHits atomic.Int32
 	dbQueries      *database.Queries
+	platform       string
 }
 
 // PROFANITY HANDLERS
@@ -78,7 +81,19 @@ func (cfg *apiConfig) respondWithJSON(w http.ResponseWriter, code int, payload i
 
 // METRICS
 func (cfg *apiConfig) ResetMetricsInc(w http.ResponseWriter, r *http.Request) {
-	cfg.fileserverHits.Store(0)
+	if cfg.platform == "dev" {
+		err := cfg.dbQueries.DeleteAllUsers(r.Context())
+		if err != nil {
+			log.Printf("failed to delete db: %v", err)
+			w.WriteHeader(http.StatusInternalServerError) //500
+			return
+		}
+		cfg.fileserverHits.Store(0)
+		w.WriteHeader(http.StatusOK) //200
+
+	} else {
+		w.WriteHeader(http.StatusForbidden) //403
+	}
 }
 
 func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
@@ -112,14 +127,15 @@ func (cfg *apiConfig) AdminMetrics(w http.ResponseWriter, r *http.Request) {
 func main() {
 	err := godotenv.Load()
 	if err != nil {
-		log.Fatal("error loading new .env file")
+		log.Print("error loading new .env file")
 	}
 	dbURL := os.Getenv("DB_URL")
 	db, err := sql.Open("postgres", dbURL)
 	if err != nil {
-		log.Fatal("error generating new db")
+		log.Print("error generating new db")
 	}
 	apiConfig := apiConfig{}
+	apiConfig.platform = os.Getenv("PLATFORM")
 	apiConfig.dbQueries = database.New(db)
 	mux := http.NewServeMux()
 	mux.Handle("/app/", apiConfig.middlewareMetricsInc(http.StripPrefix("/app", http.FileServer(http.Dir(".")))))
@@ -127,13 +143,42 @@ func main() {
 		Addr:    ":8080",
 		Handler: mux,
 	}
+	mux.HandleFunc("GET /admin/metrics", apiConfig.AdminMetrics)
+	mux.HandleFunc("POST /admin/reset", apiConfig.ResetMetricsInc)
 	mux.HandleFunc("GET /api/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("OK"))
 	})
-	mux.HandleFunc("GET /admin/metrics", apiConfig.AdminMetrics)
-	mux.HandleFunc("POST /admin/reset", apiConfig.ResetMetricsInc)
+	mux.HandleFunc("POST /api/users", func(w http.ResponseWriter, r *http.Request) {
+		type email struct {
+			Email string `json:"email"`
+		}
+		decoder := json.NewDecoder(r.Body)
+		userEmail := email{}
+		err := decoder.Decode(&userEmail)
+		if err != nil {
+			log.Print("error decoding user email")
+			return
+		}
+		newCreatedUser, err := apiConfig.dbQueries.CreateUser(r.Context(), userEmail.Email)
+		if err != nil {
+			log.Print("error creating new user in DB")
+		}
+		type User struct {
+			ID        uuid.UUID `json:"id"`
+			CreatedAt time.Time `json:"created_at"`
+			UpdatedAt time.Time `json:"updated_at"`
+			Email     string    `json:"email"`
+		}
+		user := User{
+			ID:        newCreatedUser.ID,
+			CreatedAt: newCreatedUser.CreatedAt,
+			UpdatedAt: newCreatedUser.UpdatedAt,
+			Email:     newCreatedUser.Email,
+		}
+		apiConfig.respondWithJSON(w, 201, user)
+	})
 	mux.HandleFunc("POST /api/validate_chirp", func(w http.ResponseWriter, r *http.Request) {
 		//define struct
 		type parameters struct {
@@ -148,14 +193,11 @@ func main() {
 			apiConfig.respondWithError(w, 400, "Something went wrong")
 			return
 		}
-		log.Printf("params: %+v", params)
 		if len(params.Body) > 140 {
 			apiConfig.respondWithError(w, 400, "Chirp is too long")
 			return
 		}
-		log.Printf("params: %+v", params)
 		params.Cleaned_Body = ReplaceProfanity(params.Body)
-		log.Printf("params: %+v", params)
 		apiConfig.respondWithJSON(w, 200, params)
 	})
 	serverErr := srvr.ListenAndServe()
