@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -17,10 +18,31 @@ import (
 	_ "github.com/lib/pq"
 )
 
+const MaxChirpLength = 140
+
 type apiConfig struct {
 	fileserverHits atomic.Int32
 	dbQueries      *database.Queries
 	platform       string
+}
+
+type chirp struct {
+	ID        uuid.UUID `json:"id"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+	Body      string    `json:"body"`
+	UserID    uuid.UUID `json:"user_id"`
+}
+
+// internal/database to json converters
+func databaseChirpToChirp(c database.Chirp) chirp {
+	return chirp{
+		ID:        c.ID,
+		CreatedAt: c.CreatedAt,
+		UpdatedAt: c.UpdatedAt,
+		Body:      c.Body,
+		UserID:    c.UserID,
+	}
 }
 
 // CHIRP VALIDATION/PROFANITY HANDLERS
@@ -46,6 +68,13 @@ func CheckForProfanity(word string) bool {
 		}
 	}
 	return found
+}
+
+func ValidateChirp(body string) (string, error) {
+	if len(body) > MaxChirpLength {
+		return "", errors.New("Chirp is too long")
+	}
+	return ReplaceProfanity(body), nil
 }
 
 // JSON FUNCS
@@ -80,6 +109,36 @@ func (cfg *apiConfig) respondWithJSON(w http.ResponseWriter, code int, payload i
 }
 
 // METRICS
+func (cfg *apiConfig) CreateChirp(w http.ResponseWriter, r *http.Request) {
+	type parameters struct {
+		Body   string    `json:"body"`
+		UserID uuid.UUID `json:"user_id"`
+	}
+	decoder := json.NewDecoder(r.Body)
+	params := parameters{}
+	err := decoder.Decode(&params)
+	if err != nil {
+		cfg.respondWithError(w, http.StatusBadRequest, "couldn't decode parameters") //400
+		return
+	}
+	validated, err := ValidateChirp(params.Body)
+	if err != nil {
+		cfg.respondWithError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	payload := database.CreateChirpParams{
+		Body:   validated,
+		UserID: params.UserID,
+	}
+	newChirp, err := cfg.dbQueries.CreateChirp(r.Context(), payload)
+	if err != nil {
+		cfg.respondWithError(w, http.StatusInternalServerError, "could not create chirp") //500
+		return
+	}
+	formattedNewChirp := databaseChirpToChirp(newChirp)
+	cfg.respondWithJSON(w, http.StatusCreated, formattedNewChirp) //201
+}
+
 func (cfg *apiConfig) ResetMetrics(w http.ResponseWriter, r *http.Request) {
 	if cfg.platform == "dev" {
 		err := cfg.dbQueries.DeleteAllUsers(r.Context())
@@ -145,49 +204,7 @@ func main() {
 	}
 	mux.HandleFunc("GET /admin/metrics", apiConfig.AdminMetrics)
 	mux.HandleFunc("POST /admin/reset", apiConfig.ResetMetrics)
-	mux.HandleFunc("POST /api/chirps", func(w http.ResponseWriter, r *http.Request) {
-
-		//decode json
-		type paramaters struct {
-			Body    string    `json:"body"`
-			User_id uuid.UUID `json:"user_id"`
-		}
-		decoder := json.NewDecoder(r.Body)
-		params := paramaters{}
-		payload := database.CreateChirpParams{}
-		err := decoder.Decode(&params)
-		if err != nil {
-			apiConfig.respondWithError(w, http.StatusBadRequest, "Something went wrong") //400
-			return
-		}
-		payload.Body = params.Body
-		payload.UserID = params.User_id
-		if len(payload.Body) > 140 {
-			apiConfig.respondWithError(w, http.StatusBadRequest, "Chirp is too long") //400
-			return
-		}
-		payload.Body = ReplaceProfanity(payload.Body)
-		type chirpPayload struct {
-			ID        uuid.UUID `json:"id"`
-			CreatedAt time.Time `json:"created_at"`
-			UpdatedAt time.Time `json:"updated_at"`
-			Body      string    `json:"body"`
-			User_id   uuid.UUID `json:"user_id"`
-		}
-		newChirp, err := apiConfig.dbQueries.CreateChirp(r.Context(), payload)
-		if err != nil {
-			apiConfig.respondWithError(w, http.StatusInternalServerError, "Internal Server Error") //500
-			return
-		}
-		formattedNewChirp := chirpPayload{
-			ID:        newChirp.ID,
-			CreatedAt: newChirp.CreatedAt,
-			UpdatedAt: newChirp.UpdatedAt,
-			Body:      newChirp.Body,
-			User_id:   newChirp.UserID,
-		}
-		apiConfig.respondWithJSON(w, http.StatusCreated, formattedNewChirp) //201
-	})
+	mux.HandleFunc("POST /api/chirps", apiConfig.CreateChirp)
 	mux.HandleFunc("GET /api/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.WriteHeader(http.StatusOK)
