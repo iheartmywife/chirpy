@@ -23,7 +23,7 @@ type apiConfig struct {
 	platform       string
 }
 
-// PROFANITY HANDLERS
+// CHIRP VALIDATION/PROFANITY HANDLERS
 func ReplaceProfanity(chirp string) string {
 	contents := strings.Fields(chirp)
 	replacementWord := "****"
@@ -80,7 +80,7 @@ func (cfg *apiConfig) respondWithJSON(w http.ResponseWriter, code int, payload i
 }
 
 // METRICS
-func (cfg *apiConfig) ResetMetricsInc(w http.ResponseWriter, r *http.Request) {
+func (cfg *apiConfig) ResetMetrics(w http.ResponseWriter, r *http.Request) {
 	if cfg.platform == "dev" {
 		err := cfg.dbQueries.DeleteAllUsers(r.Context())
 		if err != nil {
@@ -144,7 +144,50 @@ func main() {
 		Handler: mux,
 	}
 	mux.HandleFunc("GET /admin/metrics", apiConfig.AdminMetrics)
-	mux.HandleFunc("POST /admin/reset", apiConfig.ResetMetricsInc)
+	mux.HandleFunc("POST /admin/reset", apiConfig.ResetMetrics)
+	mux.HandleFunc("POST /api/chirps", func(w http.ResponseWriter, r *http.Request) {
+
+		//decode json
+		type paramaters struct {
+			Body    string    `json:"body"`
+			User_id uuid.UUID `json:"user_id"`
+		}
+		decoder := json.NewDecoder(r.Body)
+		params := paramaters{}
+		payload := database.CreateChirpParams{}
+		err := decoder.Decode(&params)
+		if err != nil {
+			apiConfig.respondWithError(w, http.StatusBadRequest, "Something went wrong") //400
+			return
+		}
+		payload.Body = params.Body
+		payload.UserID = params.User_id
+		if len(payload.Body) > 140 {
+			apiConfig.respondWithError(w, http.StatusBadRequest, "Chirp is too long") //400
+			return
+		}
+		payload.Body = ReplaceProfanity(payload.Body)
+		type chirpPayload struct {
+			ID        uuid.UUID `json:"id"`
+			CreatedAt time.Time `json:"created_at"`
+			UpdatedAt time.Time `json:"updated_at"`
+			Body      string    `json:"body"`
+			User_id   uuid.UUID `json:"user_id"`
+		}
+		newChirp, err := apiConfig.dbQueries.CreateChirp(r.Context(), payload)
+		if err != nil {
+			apiConfig.respondWithError(w, http.StatusInternalServerError, "Internal Server Error") //500
+			return
+		}
+		formattedNewChirp := chirpPayload{
+			ID:        newChirp.ID,
+			CreatedAt: newChirp.CreatedAt,
+			UpdatedAt: newChirp.UpdatedAt,
+			Body:      newChirp.Body,
+			User_id:   newChirp.UserID,
+		}
+		apiConfig.respondWithJSON(w, http.StatusCreated, formattedNewChirp) //201
+	})
 	mux.HandleFunc("GET /api/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.WriteHeader(http.StatusOK)
@@ -180,25 +223,7 @@ func main() {
 		apiConfig.respondWithJSON(w, 201, user)
 	})
 	mux.HandleFunc("POST /api/validate_chirp", func(w http.ResponseWriter, r *http.Request) {
-		//define struct
-		type parameters struct {
-			Body         string `json:"body"`
-			Cleaned_Body string `json:"cleaned_body"`
-		}
-		//decode json
-		decoder := json.NewDecoder(r.Body)
-		params := parameters{}
-		err := decoder.Decode(&params)
-		if err != nil {
-			apiConfig.respondWithError(w, 400, "Something went wrong")
-			return
-		}
-		if len(params.Body) > 140 {
-			apiConfig.respondWithError(w, 400, "Chirp is too long")
-			return
-		}
-		params.Cleaned_Body = ReplaceProfanity(params.Body)
-		apiConfig.respondWithJSON(w, 200, params)
+
 	})
 	serverErr := srvr.ListenAndServe()
 	if serverErr != nil {
