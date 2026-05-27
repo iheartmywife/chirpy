@@ -1,1 +1,1 @@
-GET http://localhost:8080/api/chirps"
+GET http://localhost:8080/api/chirps/c95f9bbc-98a3-4ade-bad1-cceb0478d908
