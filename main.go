@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/iheartmywife/chirpy/internal/auth"
 	"github.com/iheartmywife/chirpy/internal/database"
 	"github.com/joho/godotenv"
 	_ "github.com/lib/pq"
@@ -32,6 +33,10 @@ type chirp struct {
 	UpdatedAt time.Time `json:"updated_at"`
 	Body      string    `json:"body"`
 	UserID    uuid.UUID `json:"user_id"`
+}
+type userData struct {
+	Email    string `json:"email"`
+	Password string `json:"password"`
 }
 
 // internal/database to json converters
@@ -75,6 +80,19 @@ func ValidateChirp(body string) (string, error) {
 		return "", errors.New("Chirp is too long")
 	}
 	return ReplaceProfanity(body), nil
+}
+
+// Auth Help
+func (cfg *apiConfig) DecodeLoginInfo(r *http.Request) (data userData) {
+	decoder := json.NewDecoder(r.Body)
+	userInput := userData{}
+	err := decoder.Decode(&userInput)
+	if err != nil {
+		log.Print("error decoding user email")
+		return userData{}
+	}
+	return userInput
+
 }
 
 // JSON FUNCS
@@ -240,18 +258,16 @@ func main() {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("OK"))
 	})
+	mux.HandleFunc("POST /api/login", func(w http.ResponseWriter, r *http.Request) {
+		loginInfo := apiConfig.DecodeLoginInfo(r)
+		valid := auth.CheckPasswordHash()
+		apiConfig.dbQueries.GetUser(r.Context(), loginInfo.Email)
+
+	})
 	mux.HandleFunc("POST /api/users", func(w http.ResponseWriter, r *http.Request) {
-		type email struct {
-			Email string `json:"email"`
-		}
-		decoder := json.NewDecoder(r.Body)
-		userEmail := email{}
-		err := decoder.Decode(&userEmail)
-		if err != nil {
-			log.Print("error decoding user email")
-			return
-		}
-		newCreatedUser, err := apiConfig.dbQueries.CreateUser(r.Context(), userEmail.Email)
+		userInput := apiConfig.DecodeLoginInfo(r)
+		userInput.Password = auth.HashPassword(userInput.Password)
+		newCreatedUser, err := apiConfig.dbQueries.CreateUser(r.Context(), userInput.Email)
 		if err != nil {
 			log.Print("error creating new user in DB")
 		}
