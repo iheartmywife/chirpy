@@ -1,7 +1,1 @@
-POST http://localhost:8080/api/users
-Content-Type: application/json
-
-{
-  "email": "user3@example.com"
-}
-//the db wont add duplicate users so each new test requires a different user email made.
+GET http://localhost:8080/api/chirps"

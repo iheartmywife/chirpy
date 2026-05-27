@@ -138,6 +138,20 @@ func (cfg *apiConfig) CreateChirp(w http.ResponseWriter, r *http.Request) {
 	formattedNewChirp := databaseChirpToChirp(newChirp)
 	cfg.respondWithJSON(w, http.StatusCreated, formattedNewChirp) //201
 }
+func (cfg *apiConfig) GetAllChirps(w http.ResponseWriter, r *http.Request) {
+	var allChirpsFormatted []chirp
+
+	allChirpsRaw, err := cfg.dbQueries.GetAllChirps(r.Context())
+	if err != nil {
+		cfg.respondWithError(w, http.StatusInternalServerError, "could not get all chirps")
+	}
+	for _, chirp := range allChirpsRaw {
+		formattedChirp := databaseChirpToChirp(chirp)
+		allChirpsFormatted = append(allChirpsFormatted, formattedChirp)
+	}
+	cfg.respondWithJSON(w, http.StatusOK, allChirpsFormatted)
+
+}
 
 func (cfg *apiConfig) ResetMetrics(w http.ResponseWriter, r *http.Request) {
 	if cfg.platform == "dev" {
@@ -205,6 +219,7 @@ func main() {
 	mux.HandleFunc("GET /admin/metrics", apiConfig.AdminMetrics)
 	mux.HandleFunc("POST /admin/reset", apiConfig.ResetMetrics)
 	mux.HandleFunc("POST /api/chirps", apiConfig.CreateChirp)
+	mux.HandleFunc("GET /api/chirps", apiConfig.GetAllChirps)
 	mux.HandleFunc("GET /api/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.WriteHeader(http.StatusOK)

@@ -10,3 +10,7 @@ RETURNING *;
 
 -- name: DeleteAllUsers :exec
 DELETE FROM users;
+
+-- name: GetAllChirps :many
+SELECT * FROM chirps
+ORDER BY created_at ASC;
