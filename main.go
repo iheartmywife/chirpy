@@ -38,6 +38,12 @@ type userData struct {
 	Email    string `json:"email"`
 	Password string `json:"password"`
 }
+type User struct {
+	ID        uuid.UUID `json:"id"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+	Email     string    `json:"email"`
+}
 
 // internal/database to json converters
 func databaseChirpToChirp(c database.Chirp) chirp {
@@ -47,6 +53,15 @@ func databaseChirpToChirp(c database.Chirp) chirp {
 		UpdatedAt: c.UpdatedAt,
 		Body:      c.Body,
 		UserID:    c.UserID,
+	}
+}
+
+func databaseUserToUser(u database.User) User {
+	return User{
+		ID:        u.ID,
+		CreatedAt: u.CreatedAt,
+		UpdatedAt: u.UpdatedAt,
+		Email:     u.Email,
 	}
 }
 
@@ -83,12 +98,12 @@ func ValidateChirp(body string) (string, error) {
 }
 
 // Auth Help
-func (cfg *apiConfig) DecodeLoginInfo(r *http.Request) (data userData) {
+func (cfg *apiConfig) DecodeLoginInfo(w http.ResponseWriter, r *http.Request) (data userData) {
 	decoder := json.NewDecoder(r.Body)
 	userInput := userData{}
 	err := decoder.Decode(&userInput)
 	if err != nil {
-		log.Print("error decoding user email")
+		cfg.respondWithError(w, http.StatusUnauthorized, "error decoding json")
 		return userData{}
 	}
 	return userInput
@@ -96,6 +111,24 @@ func (cfg *apiConfig) DecodeLoginInfo(r *http.Request) (data userData) {
 }
 
 // JSON FUNCS
+func (cfg *apiConfig) respondWithErrorSpecific(w http.ResponseWriter, code int, msg string, e error) {
+	type returnVals struct {
+		Err string `json:"error"`
+	}
+	respBody := returnVals{
+		Err: fmt.Sprintf(msg, e),
+	}
+	data, er := json.Marshal(respBody)
+	if er != nil {
+		log.Printf("error marshalling Json: %s", er)
+		w.WriteHeader(500)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	w.Write(data)
+}
+
 func (cfg *apiConfig) respondWithError(w http.ResponseWriter, code int, msg string) {
 	type returnVals struct {
 		Err string `json:"error"`
@@ -259,30 +292,39 @@ func main() {
 		w.Write([]byte("OK"))
 	})
 	mux.HandleFunc("POST /api/login", func(w http.ResponseWriter, r *http.Request) {
-		loginInfo := apiConfig.DecodeLoginInfo(r)
-		valid := auth.CheckPasswordHash()
-		apiConfig.dbQueries.GetUser(r.Context(), loginInfo.Email)
+		loginInfo := apiConfig.DecodeLoginInfo(w, r)
+		user, err := apiConfig.dbQueries.GetUser(r.Context(), loginInfo.Email)
+		if err != nil {
+			apiConfig.respondWithError(w, http.StatusUnauthorized, "Incorrect email or password, error with getting user")
+			return
+		}
+		valid, err := auth.CheckPasswordHash(loginInfo.Password, user.HashedPassword)
+		if err != nil {
+			apiConfig.respondWithErrorSpecific(w, http.StatusUnauthorized, "Incorrect email or password, error in checking password hash: %v", err)
+			return
+		}
+		if !valid {
+			apiConfig.respondWithError(w, http.StatusUnauthorized, "Incorrect email or password, password does not match hash")
+			return
+		}
+		formattedUser := databaseUserToUser(user)
+		apiConfig.respondWithJSON(w, http.StatusOK, formattedUser)
 
 	})
 	mux.HandleFunc("POST /api/users", func(w http.ResponseWriter, r *http.Request) {
-		userInput := apiConfig.DecodeLoginInfo(r)
-		userInput.Password = auth.HashPassword(userInput.Password)
-		newCreatedUser, err := apiConfig.dbQueries.CreateUser(r.Context(), userInput.Email)
+		userInput := apiConfig.DecodeLoginInfo(w, r)
+		hashedPassword, err := auth.HashPassword(userInput.Password)
+		if err != nil {
+			log.Print("error hashing password")
+		}
+		newCreatedUser, err := apiConfig.dbQueries.CreateUser(r.Context(), database.CreateUserParams{
+			Email:          userInput.Email,
+			HashedPassword: hashedPassword,
+		})
 		if err != nil {
 			log.Print("error creating new user in DB")
 		}
-		type User struct {
-			ID        uuid.UUID `json:"id"`
-			CreatedAt time.Time `json:"created_at"`
-			UpdatedAt time.Time `json:"updated_at"`
-			Email     string    `json:"email"`
-		}
-		user := User{
-			ID:        newCreatedUser.ID,
-			CreatedAt: newCreatedUser.CreatedAt,
-			UpdatedAt: newCreatedUser.UpdatedAt,
-			Email:     newCreatedUser.Email,
-		}
+		user := databaseUserToUser(newCreatedUser)
 		apiConfig.respondWithJSON(w, 201, user)
 	})
 	mux.HandleFunc("POST /api/validate_chirp", func(w http.ResponseWriter, r *http.Request) {
