@@ -25,6 +25,7 @@ type apiConfig struct {
 	fileserverHits atomic.Int32
 	dbQueries      *database.Queries
 	platform       string
+	jwtSecret      string
 }
 
 type chirp struct {
@@ -35,14 +36,16 @@ type chirp struct {
 	UserID    uuid.UUID `json:"user_id"`
 }
 type userData struct {
-	Email    string `json:"email"`
-	Password string `json:"password"`
+	Email     string        `json:"email"`
+	Password  string        `json:"password"`
+	ExpiresIn time.Duration `json:"expires_in_seconds"`
 }
 type User struct {
 	ID        uuid.UUID `json:"id"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 	Email     string    `json:"email"`
+	Token     string    `json:"token"`
 }
 
 // internal/database to json converters
@@ -102,12 +105,41 @@ func (cfg *apiConfig) DecodeLoginInfo(w http.ResponseWriter, r *http.Request) (d
 	decoder := json.NewDecoder(r.Body)
 	userInput := userData{}
 	err := decoder.Decode(&userInput)
+	if userInput.ExpiresIn == time.Duration(0) {
+		userInput.ExpiresIn = time.Hour
+	}
 	if err != nil {
 		cfg.respondWithError(w, http.StatusUnauthorized, "error decoding json")
 		return userData{}
 	}
 	return userInput
 
+}
+
+// Auth
+func (cfg *apiConfig) Login(w http.ResponseWriter, r *http.Request) {
+	loginInfo := cfg.DecodeLoginInfo(w, r)
+	user, err := cfg.dbQueries.GetUser(r.Context(), loginInfo.Email)
+	if err != nil {
+		cfg.respondWithError(w, http.StatusUnauthorized, "Incorrect email or password, error with getting user")
+		return
+	}
+	valid, err := auth.CheckPasswordHash(loginInfo.Password, user.HashedPassword)
+	if err != nil {
+		cfg.respondWithErrorSpecific(w, http.StatusUnauthorized, "Incorrect email or password, error in checking password hash: %v", err)
+		return
+	}
+	if !valid {
+		cfg.respondWithError(w, http.StatusUnauthorized, "Incorrect email or password, password does not match hash")
+		return
+	}
+	formattedUser := databaseUserToUser(user)
+	formattedUser.Token, err = auth.MakeJWT(formattedUser.ID, cfg.jwtSecret, loginInfo.ExpiresIn)
+	if err != nil {
+		cfg.respondWithError(w, http.StatusInternalServerError, "Error creating auth token")
+		return
+	}
+	cfg.respondWithJSON(w, http.StatusOK, formattedUser)
 }
 
 // JSON FUNCS
@@ -162,8 +194,7 @@ func (cfg *apiConfig) respondWithJSON(w http.ResponseWriter, code int, payload i
 // METRICS
 func (cfg *apiConfig) CreateChirp(w http.ResponseWriter, r *http.Request) {
 	type parameters struct {
-		Body   string    `json:"body"`
-		UserID uuid.UUID `json:"user_id"`
+		Body string `json:"body"`
 	}
 	decoder := json.NewDecoder(r.Body)
 	params := parameters{}
@@ -172,14 +203,26 @@ func (cfg *apiConfig) CreateChirp(w http.ResponseWriter, r *http.Request) {
 		cfg.respondWithError(w, http.StatusBadRequest, "couldn't decode parameters") //400
 		return
 	}
-	validated, err := ValidateChirp(params.Body)
+	//potentially abstract away into helper func?
+	token, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		cfg.respondWithError(w, http.StatusUnauthorized, err.Error()) //401
+		return
+	}
+	id, err := auth.ValidateJWT(token, cfg.jwtSecret)
+	if err != nil {
+		cfg.respondWithError(w, http.StatusUnauthorized, err.Error())
+		return
+	}
+
+	validChirp, err := ValidateChirp(params.Body)
 	if err != nil {
 		cfg.respondWithError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	payload := database.CreateChirpParams{
-		Body:   validated,
-		UserID: params.UserID,
+		Body:   validChirp,
+		UserID: id,
 	}
 	newChirp, err := cfg.dbQueries.CreateChirp(r.Context(), payload)
 	if err != nil {
@@ -275,6 +318,7 @@ func main() {
 	apiConfig := apiConfig{}
 	apiConfig.platform = os.Getenv("PLATFORM")
 	apiConfig.dbQueries = database.New(db)
+	apiConfig.jwtSecret = os.Getenv("SECRET")
 	mux := http.NewServeMux()
 	mux.Handle("/app/", apiConfig.middlewareMetricsInc(http.StripPrefix("/app", http.FileServer(http.Dir(".")))))
 	srvr := &http.Server{
@@ -291,26 +335,7 @@ func main() {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("OK"))
 	})
-	mux.HandleFunc("POST /api/login", func(w http.ResponseWriter, r *http.Request) {
-		loginInfo := apiConfig.DecodeLoginInfo(w, r)
-		user, err := apiConfig.dbQueries.GetUser(r.Context(), loginInfo.Email)
-		if err != nil {
-			apiConfig.respondWithError(w, http.StatusUnauthorized, "Incorrect email or password, error with getting user")
-			return
-		}
-		valid, err := auth.CheckPasswordHash(loginInfo.Password, user.HashedPassword)
-		if err != nil {
-			apiConfig.respondWithErrorSpecific(w, http.StatusUnauthorized, "Incorrect email or password, error in checking password hash: %v", err)
-			return
-		}
-		if !valid {
-			apiConfig.respondWithError(w, http.StatusUnauthorized, "Incorrect email or password, password does not match hash")
-			return
-		}
-		formattedUser := databaseUserToUser(user)
-		apiConfig.respondWithJSON(w, http.StatusOK, formattedUser)
-
-	})
+	mux.HandleFunc("POST /api/login", apiConfig.Login)
 	mux.HandleFunc("POST /api/users", func(w http.ResponseWriter, r *http.Request) {
 		userInput := apiConfig.DecodeLoginInfo(w, r)
 		hashedPassword, err := auth.HashPassword(userInput.Password)
