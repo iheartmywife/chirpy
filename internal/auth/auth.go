@@ -1,6 +1,8 @@
 package auth
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log"
@@ -29,11 +31,17 @@ func CheckPasswordHash(password, hash string) (bool, error) {
 	return result, nil
 }
 
-func MakeJWT(userID uuid.UUID, tokenSecret string, expiresIn time.Duration) (string, error) {
+func MakeRefreshToken() string {
+	key := rand.Text()
+	encoded := hex.EncodeToString([]byte(key))
+	return encoded
+}
+
+func MakeJWT(userID uuid.UUID, tokenSecret string) (string, error) {
 	newToken := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.RegisteredClaims{
 		Issuer:    "chirpy-access",
 		IssuedAt:  jwt.NewNumericDate(time.Now().UTC()),
-		ExpiresAt: jwt.NewNumericDate(time.Now().UTC().Add(expiresIn)),
+		ExpiresAt: jwt.NewNumericDate(time.Now().UTC().Add(time.Hour)),
 		Subject:   userID.String(),
 	})
 	signedToken, err := newToken.SignedString([]byte(tokenSecret))

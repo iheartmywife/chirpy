@@ -41,11 +41,12 @@ type userData struct {
 	ExpiresIn time.Duration `json:"expires_in_seconds"`
 }
 type User struct {
-	ID        uuid.UUID `json:"id"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
-	Email     string    `json:"email"`
-	Token     string    `json:"token"`
+	ID           uuid.UUID `json:"id"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
+	Email        string    `json:"email"`
+	Token        string    `json:"token"`
+	RefreshToken string    `json:"refresh_token"`
 }
 
 // internal/database to json converters
@@ -134,11 +135,17 @@ func (cfg *apiConfig) Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	formattedUser := databaseUserToUser(user)
-	formattedUser.Token, err = auth.MakeJWT(formattedUser.ID, cfg.jwtSecret, loginInfo.ExpiresIn)
+	formattedUser.Token, err = auth.MakeJWT(formattedUser.ID, cfg.jwtSecret)
 	if err != nil {
 		cfg.respondWithError(w, http.StatusInternalServerError, "Error creating auth token")
 		return
 	}
+	refreshToken, err := cfg.dbQueries.CreateRefreshToken(r.Context(), database.CreateRefreshTokenParams{
+		Token:     auth.MakeRefreshToken(),
+		UserID:    formattedUser.ID,
+		ExpiresAt: time.Now().AddDate(0, 0, 60),
+	})
+	formattedUser.RefreshToken = refreshToken.Token
 	cfg.respondWithJSON(w, http.StatusOK, formattedUser)
 }
 
@@ -351,6 +358,35 @@ func main() {
 		}
 		user := databaseUserToUser(newCreatedUser)
 		apiConfig.respondWithJSON(w, 201, user)
+	})
+	mux.HandleFunc("POST /api/refresh", func(w http.ResponseWriter, r *http.Request) {
+		token, err := auth.GetBearerToken(r.Header)
+		if err != nil {
+			apiConfig.respondWithError(w, http.StatusUnauthorized, err.Error()) //401
+			return
+		}
+		user, err := apiConfig.dbQueries.GetUserFromRefreshToken(r.Context(), token)
+		if err != nil {
+			apiConfig.respondWithErrorSpecific(w, http.StatusUnauthorized, "error found", err)
+			return
+		}
+		formattedUser := databaseUserToUser(user)
+		newAccessToken, er := auth.MakeJWT(formattedUser.ID, apiConfig.jwtSecret)
+		if er != nil {
+			apiConfig.respondWithErrorSpecific(w, http.StatusBadRequest, "error: ", er)
+			return
+		}
+		formattedUser.Token = newAccessToken
+		apiConfig.respondWithJSON(w, http.StatusOK, formattedUser)
+	})
+	mux.HandleFunc("POST /api/revoke", func(w http.ResponseWriter, r *http.Request) {
+		token, err := auth.GetBearerToken(r.Header)
+		if err != nil {
+			apiConfig.respondWithError(w, http.StatusUnauthorized, err.Error()) //401
+			return
+		}
+		apiConfig.dbQueries.RevokeToken(r.Context(), token)
+		w.WriteHeader(http.StatusNoContent)
 	})
 	mux.HandleFunc("POST /api/validate_chirp", func(w http.ResponseWriter, r *http.Request) {
 
