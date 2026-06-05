@@ -60,12 +60,12 @@ func databaseChirpToChirp(c database.Chirp) chirp {
 	}
 }
 
-func databaseUserToUser(u database.User) User {
+func databaseUserToUser(id uuid.UUID, createdAt time.Time, updatedAt time.Time, email string) User {
 	return User{
-		ID:        u.ID,
-		CreatedAt: u.CreatedAt,
-		UpdatedAt: u.UpdatedAt,
-		Email:     u.Email,
+		ID:        id,
+		CreatedAt: createdAt,
+		UpdatedAt: updatedAt,
+		Email:     email,
 	}
 }
 
@@ -101,7 +101,56 @@ func ValidateChirp(body string) (string, error) {
 	return ReplaceProfanity(body), nil
 }
 
-// Auth Help
+// USER METHODS
+func (cfg *apiConfig) UpdateUserLogin(w http.ResponseWriter, r *http.Request) {
+	token, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		cfg.respondWithErrorSpecific(w, http.StatusUnauthorized, "No bearer token", err) //401
+		return
+	}
+	NewInfo := cfg.DecodeLoginInfo(w, r)
+
+	id, er := auth.ValidateJWT(token, cfg.jwtSecret)
+	if er != nil {
+		cfg.respondWithErrorSpecific(w, http.StatusUnauthorized, "unable to validate jwt", er) //401
+		return
+	}
+	hashedPW, e := auth.HashPassword(NewInfo.Password)
+	if e != nil {
+		cfg.respondWithErrorSpecific(w, http.StatusUnauthorized, "unable to hash password", e) //401
+		return
+	}
+	dbUpdatedUser, err := cfg.dbQueries.UpdateUser(r.Context(), database.UpdateUserParams{
+		ID:             id,
+		Email:          NewInfo.Email,
+		HashedPassword: hashedPW,
+	})
+	if err != nil {
+		cfg.respondWithErrorSpecific(w, http.StatusUnauthorized, "Unable to update user", err) //401
+		return
+	}
+	user := databaseUserToUser(dbUpdatedUser.ID, dbUpdatedUser.CreatedAt, dbUpdatedUser.UpdatedAt, dbUpdatedUser.Email)
+	cfg.respondWithJSON(w, http.StatusOK, user)
+}
+
+func (cfg *apiConfig) CreateUser(w http.ResponseWriter, r *http.Request) {
+	userInput := cfg.DecodeLoginInfo(w, r)
+	hashedPassword, err := auth.HashPassword(userInput.Password)
+	if err != nil {
+		log.Print("error hashing password")
+	}
+	newCreatedUser, err := cfg.dbQueries.CreateUser(r.Context(), database.CreateUserParams{
+		Email:          userInput.Email,
+		HashedPassword: hashedPassword,
+	})
+	if err != nil {
+		log.Print("error creating new user in DB")
+	}
+	user := databaseUserToUser(newCreatedUser.ID, newCreatedUser.CreatedAt, newCreatedUser.UpdatedAt, newCreatedUser.Email)
+	cfg.respondWithJSON(w, 201, user)
+}
+
+// Authorization Help
 func (cfg *apiConfig) DecodeLoginInfo(w http.ResponseWriter, r *http.Request) (data userData) {
 	decoder := json.NewDecoder(r.Body)
 	userInput := userData{}
@@ -117,7 +166,7 @@ func (cfg *apiConfig) DecodeLoginInfo(w http.ResponseWriter, r *http.Request) (d
 
 }
 
-// Auth
+// Authorization
 func (cfg *apiConfig) Login(w http.ResponseWriter, r *http.Request) {
 	loginInfo := cfg.DecodeLoginInfo(w, r)
 	user, err := cfg.dbQueries.GetUser(r.Context(), loginInfo.Email)
@@ -134,7 +183,7 @@ func (cfg *apiConfig) Login(w http.ResponseWriter, r *http.Request) {
 		cfg.respondWithError(w, http.StatusUnauthorized, "Incorrect email or password, password does not match hash")
 		return
 	}
-	formattedUser := databaseUserToUser(user)
+	formattedUser := databaseUserToUser(user.ID, user.CreatedAt, user.UpdatedAt, user.Email)
 	formattedUser.Token, err = auth.MakeJWT(formattedUser.ID, cfg.jwtSecret)
 	if err != nil {
 		cfg.respondWithError(w, http.StatusInternalServerError, "Error creating auth token")
@@ -147,6 +196,37 @@ func (cfg *apiConfig) Login(w http.ResponseWriter, r *http.Request) {
 	})
 	formattedUser.RefreshToken = refreshToken.Token
 	cfg.respondWithJSON(w, http.StatusOK, formattedUser)
+}
+
+func (cfg *apiConfig) RefreshToken(w http.ResponseWriter, r *http.Request) {
+	token, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		cfg.respondWithError(w, http.StatusUnauthorized, err.Error()) //401
+		return
+	}
+	user, err := cfg.dbQueries.GetUserFromRefreshToken(r.Context(), token)
+	if err != nil {
+		cfg.respondWithErrorSpecific(w, http.StatusUnauthorized, "error found", err)
+		return
+	}
+	formattedUser := databaseUserToUser(user.ID, user.CreatedAt, user.UpdatedAt, user.Email)
+	newAccessToken, er := auth.MakeJWT(formattedUser.ID, cfg.jwtSecret)
+	if er != nil {
+		cfg.respondWithErrorSpecific(w, http.StatusBadRequest, "error: ", er)
+		return
+	}
+	formattedUser.Token = newAccessToken
+	cfg.respondWithJSON(w, http.StatusOK, formattedUser)
+}
+
+func (cfg *apiConfig) RevokeToken(w http.ResponseWriter, r *http.Request) {
+	token, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		cfg.respondWithError(w, http.StatusUnauthorized, err.Error()) //401
+		return
+	}
+	cfg.dbQueries.RevokeToken(r.Context(), token)
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // JSON FUNCS
@@ -343,54 +423,10 @@ func main() {
 		w.Write([]byte("OK"))
 	})
 	mux.HandleFunc("POST /api/login", apiConfig.Login)
-	mux.HandleFunc("POST /api/users", func(w http.ResponseWriter, r *http.Request) {
-		userInput := apiConfig.DecodeLoginInfo(w, r)
-		hashedPassword, err := auth.HashPassword(userInput.Password)
-		if err != nil {
-			log.Print("error hashing password")
-		}
-		newCreatedUser, err := apiConfig.dbQueries.CreateUser(r.Context(), database.CreateUserParams{
-			Email:          userInput.Email,
-			HashedPassword: hashedPassword,
-		})
-		if err != nil {
-			log.Print("error creating new user in DB")
-		}
-		user := databaseUserToUser(newCreatedUser)
-		apiConfig.respondWithJSON(w, 201, user)
-	})
-	mux.HandleFunc("POST /api/refresh", func(w http.ResponseWriter, r *http.Request) {
-		token, err := auth.GetBearerToken(r.Header)
-		if err != nil {
-			apiConfig.respondWithError(w, http.StatusUnauthorized, err.Error()) //401
-			return
-		}
-		user, err := apiConfig.dbQueries.GetUserFromRefreshToken(r.Context(), token)
-		if err != nil {
-			apiConfig.respondWithErrorSpecific(w, http.StatusUnauthorized, "error found", err)
-			return
-		}
-		formattedUser := databaseUserToUser(user)
-		newAccessToken, er := auth.MakeJWT(formattedUser.ID, apiConfig.jwtSecret)
-		if er != nil {
-			apiConfig.respondWithErrorSpecific(w, http.StatusBadRequest, "error: ", er)
-			return
-		}
-		formattedUser.Token = newAccessToken
-		apiConfig.respondWithJSON(w, http.StatusOK, formattedUser)
-	})
-	mux.HandleFunc("POST /api/revoke", func(w http.ResponseWriter, r *http.Request) {
-		token, err := auth.GetBearerToken(r.Header)
-		if err != nil {
-			apiConfig.respondWithError(w, http.StatusUnauthorized, err.Error()) //401
-			return
-		}
-		apiConfig.dbQueries.RevokeToken(r.Context(), token)
-		w.WriteHeader(http.StatusNoContent)
-	})
-	mux.HandleFunc("POST /api/validate_chirp", func(w http.ResponseWriter, r *http.Request) {
-
-	})
+	mux.HandleFunc("POST /api/refresh", apiConfig.RefreshToken)
+	mux.HandleFunc("POST /api/revoke", apiConfig.RevokeToken)
+	mux.HandleFunc("POST /api/users", apiConfig.CreateUser)
+	mux.HandleFunc("PUT /api/users", apiConfig.UpdateUserLogin)
 	serverErr := srvr.ListenAndServe()
 	if serverErr != nil {
 		log.Fatal(serverErr)
