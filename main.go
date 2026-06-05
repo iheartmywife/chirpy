@@ -278,7 +278,7 @@ func (cfg *apiConfig) respondWithJSON(w http.ResponseWriter, code int, payload i
 	w.Write(data)
 }
 
-// METRICS
+// CHIRPS
 func (cfg *apiConfig) CreateChirp(w http.ResponseWriter, r *http.Request) {
 	type parameters struct {
 		Body string `json:"body"`
@@ -347,7 +347,35 @@ func (cfg *apiConfig) GetChirp(w http.ResponseWriter, r *http.Request) {
 	formattedChirp := databaseChirpToChirp(fullRecord)
 	cfg.respondWithJSON(w, http.StatusOK, formattedChirp)
 }
+func (cfg *apiConfig) DeleteChirp(w http.ResponseWriter, r *http.Request) {
+	token, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		cfg.respondWithErrorSpecific(w, http.StatusUnauthorized, "No bearer token", err) //403
+		return
+	}
+	userID, err := auth.ValidateJWT(token, cfg.jwtSecret)
+	if err != nil {
+		cfg.respondWithErrorSpecific(w, http.StatusForbidden, "unable to validate token", err) //403
+		return
+	}
+	chirpID, _ := uuid.Parse(r.PathValue("chirpID"))
+	chirp, err := cfg.dbQueries.GetChirp(r.Context(), chirpID)
+	if err != nil {
+		cfg.respondWithErrorSpecific(w, http.StatusForbidden, "chirp does not exist", err) //403
+		return
+	}
+	if chirp.UserID == userID {
+		cfg.dbQueries.DeleteChirp(r.Context(), database.DeleteChirpParams{
+			ID:     chirp.ID,
+			UserID: chirp.UserID,
+		})
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	cfg.respondWithError(w, http.StatusForbidden, "chirp does not belong to user")
+}
 
+// METRICS
 func (cfg *apiConfig) ResetMetrics(w http.ResponseWriter, r *http.Request) {
 	if cfg.platform == "dev" {
 		err := cfg.dbQueries.DeleteAllUsers(r.Context())
@@ -417,6 +445,7 @@ func main() {
 	mux.HandleFunc("POST /api/chirps", apiConfig.CreateChirp)
 	mux.HandleFunc("GET /api/chirps", apiConfig.GetAllChirps)
 	mux.HandleFunc("GET /api/chirps/{chirpID}", apiConfig.GetChirp)
+	mux.HandleFunc("DELETE /api/chirps/{chirpID}", apiConfig.DeleteChirp)
 	mux.HandleFunc("GET /api/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.WriteHeader(http.StatusOK)
