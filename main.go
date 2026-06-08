@@ -47,6 +47,14 @@ type User struct {
 	Email        string    `json:"email"`
 	Token        string    `json:"token"`
 	RefreshToken string    `json:"refresh_token"`
+	IsChirpyRed  bool      `json:"is_chirpy_red"`
+}
+
+type webHookPayload struct {
+	Event string `json:"event"`
+	Data  struct {
+		UserID uuid.UUID `json:"user_id"`
+	} `json:"data"`
 }
 
 // internal/database to json converters
@@ -60,12 +68,13 @@ func databaseChirpToChirp(c database.Chirp) chirp {
 	}
 }
 
-func databaseUserToUser(id uuid.UUID, createdAt time.Time, updatedAt time.Time, email string) User {
+func databaseUserToUser(id uuid.UUID, createdAt time.Time, updatedAt time.Time, email string, is_chirpy_red bool) User {
 	return User{
-		ID:        id,
-		CreatedAt: createdAt,
-		UpdatedAt: updatedAt,
-		Email:     email,
+		ID:          id,
+		CreatedAt:   createdAt,
+		UpdatedAt:   updatedAt,
+		Email:       email,
+		IsChirpyRed: is_chirpy_red,
 	}
 }
 
@@ -108,7 +117,10 @@ func (cfg *apiConfig) UpdateUserLogin(w http.ResponseWriter, r *http.Request) {
 		cfg.respondWithErrorSpecific(w, http.StatusUnauthorized, "No bearer token", err) //401
 		return
 	}
-	NewInfo := cfg.DecodeLoginInfo(w, r)
+	NewInfo, err := Decode[userData](r)
+	if err != nil {
+		cfg.respondWithError(w, http.StatusBadRequest, "Json decoding failed")
+	}
 
 	id, er := auth.ValidateJWT(token, cfg.jwtSecret)
 	if er != nil {
@@ -129,12 +141,15 @@ func (cfg *apiConfig) UpdateUserLogin(w http.ResponseWriter, r *http.Request) {
 		cfg.respondWithErrorSpecific(w, http.StatusUnauthorized, "Unable to update user", err) //401
 		return
 	}
-	user := databaseUserToUser(dbUpdatedUser.ID, dbUpdatedUser.CreatedAt, dbUpdatedUser.UpdatedAt, dbUpdatedUser.Email)
+	user := databaseUserToUser(dbUpdatedUser.ID, dbUpdatedUser.CreatedAt, dbUpdatedUser.UpdatedAt, dbUpdatedUser.Email, dbUpdatedUser.IsChirpyRed)
 	cfg.respondWithJSON(w, http.StatusOK, user)
 }
 
 func (cfg *apiConfig) CreateUser(w http.ResponseWriter, r *http.Request) {
-	userInput := cfg.DecodeLoginInfo(w, r)
+	userInput, err := Decode[userData](r)
+	if err != nil {
+		cfg.respondWithError(w, http.StatusBadRequest, "Json decoding failed")
+	}
 	hashedPassword, err := auth.HashPassword(userInput.Password)
 	if err != nil {
 		log.Print("error hashing password")
@@ -146,29 +161,48 @@ func (cfg *apiConfig) CreateUser(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		log.Print("error creating new user in DB")
 	}
-	user := databaseUserToUser(newCreatedUser.ID, newCreatedUser.CreatedAt, newCreatedUser.UpdatedAt, newCreatedUser.Email)
+	user := databaseUserToUser(newCreatedUser.ID, newCreatedUser.CreatedAt, newCreatedUser.UpdatedAt, newCreatedUser.Email, newCreatedUser.IsChirpyRed)
 	cfg.respondWithJSON(w, 201, user)
+}
+func (cfg *apiConfig) HandleWebhook(w http.ResponseWriter, r *http.Request) {
+	webHookPayload, err := Decode[webHookPayload](r)
+	if err != nil {
+		cfg.respondWithErrorSpecific(w, http.StatusInternalServerError, "error decoding json", err)
+	}
+	if webHookPayload.Event != "user.upgraded" {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	_, er := cfg.dbQueries.UpdateChirpyRedStatus(r.Context(), webHookPayload.Data.UserID)
+	if er != nil {
+		if er == sql.ErrNoRows {
+			cfg.respondWithError(w, http.StatusNotFound, "User not found")
+		} else {
+			cfg.respondWithError(w, http.StatusInternalServerError, "internal database error")
+		}
+	}
+	cfg.respondWithJSON(w, http.StatusNoContent, r.Body)
+
+}
+
+func Decode[T any](r *http.Request) (T, error) {
+	var out T
+	decoder := json.NewDecoder(r.Body)
+	err := decoder.Decode(&out)
+	return out, err
 }
 
 // Authorization Help
-func (cfg *apiConfig) DecodeLoginInfo(w http.ResponseWriter, r *http.Request) (data userData) {
-	decoder := json.NewDecoder(r.Body)
-	userInput := userData{}
-	err := decoder.Decode(&userInput)
-	if userInput.ExpiresIn == time.Duration(0) {
-		userInput.ExpiresIn = time.Hour
-	}
-	if err != nil {
-		cfg.respondWithError(w, http.StatusUnauthorized, "error decoding json")
-		return userData{}
-	}
-	return userInput
-
-}
 
 // Authorization
 func (cfg *apiConfig) Login(w http.ResponseWriter, r *http.Request) {
-	loginInfo := cfg.DecodeLoginInfo(w, r)
+	loginInfo, err := Decode[userData](r)
+	if err != nil {
+		cfg.respondWithErrorSpecific(w, http.StatusInternalServerError, "error decoding json", err)
+	}
+	if loginInfo.ExpiresIn == 0 {
+		loginInfo.ExpiresIn = time.Hour
+	}
 	user, err := cfg.dbQueries.GetUser(r.Context(), loginInfo.Email)
 	if err != nil {
 		cfg.respondWithError(w, http.StatusUnauthorized, "Incorrect email or password, error with getting user")
@@ -183,7 +217,7 @@ func (cfg *apiConfig) Login(w http.ResponseWriter, r *http.Request) {
 		cfg.respondWithError(w, http.StatusUnauthorized, "Incorrect email or password, password does not match hash")
 		return
 	}
-	formattedUser := databaseUserToUser(user.ID, user.CreatedAt, user.UpdatedAt, user.Email)
+	formattedUser := databaseUserToUser(user.ID, user.CreatedAt, user.UpdatedAt, user.Email, user.IsChirpyRed)
 	formattedUser.Token, err = auth.MakeJWT(formattedUser.ID, cfg.jwtSecret)
 	if err != nil {
 		cfg.respondWithError(w, http.StatusInternalServerError, "Error creating auth token")
@@ -209,7 +243,7 @@ func (cfg *apiConfig) RefreshToken(w http.ResponseWriter, r *http.Request) {
 		cfg.respondWithErrorSpecific(w, http.StatusUnauthorized, "error found", err)
 		return
 	}
-	formattedUser := databaseUserToUser(user.ID, user.CreatedAt, user.UpdatedAt, user.Email)
+	formattedUser := databaseUserToUser(user.ID, user.CreatedAt, user.UpdatedAt, user.Email, user.IsChirpyRed)
 	newAccessToken, er := auth.MakeJWT(formattedUser.ID, cfg.jwtSecret)
 	if er != nil {
 		cfg.respondWithErrorSpecific(w, http.StatusBadRequest, "error: ", er)
@@ -452,6 +486,7 @@ func main() {
 		w.Write([]byte("OK"))
 	})
 	mux.HandleFunc("POST /api/login", apiConfig.Login)
+	mux.HandleFunc("POST /api/polka/webhooks", apiConfig.HandleWebhook)
 	mux.HandleFunc("POST /api/refresh", apiConfig.RefreshToken)
 	mux.HandleFunc("POST /api/revoke", apiConfig.RevokeToken)
 	mux.HandleFunc("POST /api/users", apiConfig.CreateUser)
