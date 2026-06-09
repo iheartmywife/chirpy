@@ -26,6 +26,7 @@ type apiConfig struct {
 	dbQueries      *database.Queries
 	platform       string
 	jwtSecret      string
+	polkaSecret    string
 }
 
 type chirp struct {
@@ -165,9 +166,19 @@ func (cfg *apiConfig) CreateUser(w http.ResponseWriter, r *http.Request) {
 	cfg.respondWithJSON(w, 201, user)
 }
 func (cfg *apiConfig) HandleWebhook(w http.ResponseWriter, r *http.Request) {
+	responseKey, e := auth.GetAPIKey(r.Header)
+	if e != nil {
+		cfg.respondWithErrorSpecific(w, http.StatusUnauthorized, "error retrieving key", e)
+		return
+	}
+	if responseKey != cfg.polkaSecret {
+		cfg.respondWithError(w, http.StatusUnauthorized, "invalid api key")
+		return
+	}
 	webHookPayload, err := Decode[webHookPayload](r)
 	if err != nil {
 		cfg.respondWithErrorSpecific(w, http.StatusInternalServerError, "error decoding json", err)
+		return
 	}
 	if webHookPayload.Event != "user.upgraded" {
 		w.WriteHeader(http.StatusNoContent)
@@ -185,14 +196,13 @@ func (cfg *apiConfig) HandleWebhook(w http.ResponseWriter, r *http.Request) {
 
 }
 
+// GENERIC JSON DECODER
 func Decode[T any](r *http.Request) (T, error) {
 	var out T
 	decoder := json.NewDecoder(r.Body)
 	err := decoder.Decode(&out)
 	return out, err
 }
-
-// Authorization Help
 
 // Authorization
 func (cfg *apiConfig) Login(w http.ResponseWriter, r *http.Request) {
@@ -468,6 +478,7 @@ func main() {
 	apiConfig.platform = os.Getenv("PLATFORM")
 	apiConfig.dbQueries = database.New(db)
 	apiConfig.jwtSecret = os.Getenv("SECRET")
+	apiConfig.polkaSecret = os.Getenv("POLKA_KEY")
 	mux := http.NewServeMux()
 	mux.Handle("/app/", apiConfig.middlewareMetricsInc(http.StripPrefix("/app", http.FileServer(http.Dir(".")))))
 	srvr := &http.Server{

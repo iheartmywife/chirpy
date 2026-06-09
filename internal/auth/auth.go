@@ -15,6 +15,19 @@ import (
 	"github.com/google/uuid"
 )
 
+func GetAPIKey(headers http.Header) (string, error) {
+	apiString := headers.Get("Authorization")
+	if apiString == "" {
+		return "", errors.New("auth header does not exist")
+	}
+	_, token, found := strings.Cut(apiString, "ApiKey")
+	if !found {
+		return "", errors.New("Not found")
+	}
+	token = strings.TrimSpace(token)
+	return token, nil
+}
+
 func HashPassword(password string) (string, error) {
 	hashedPW, err := argon2id.CreateHash(password, argon2id.DefaultParams)
 	if err != nil {
