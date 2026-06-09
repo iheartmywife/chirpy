@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -363,19 +364,33 @@ func (cfg *apiConfig) CreateChirp(w http.ResponseWriter, r *http.Request) {
 	formattedNewChirp := databaseChirpToChirp(newChirp)
 	cfg.respondWithJSON(w, http.StatusCreated, formattedNewChirp) //201
 }
-func (cfg *apiConfig) GetAllChirps(w http.ResponseWriter, r *http.Request) {
+func (cfg *apiConfig) GetAllChirps(w http.ResponseWriter, r *http.Request) ([]chirp, error) {
 	var allChirpsFormatted []chirp
 
 	allChirpsRaw, err := cfg.dbQueries.GetAllChirps(r.Context())
 	if err != nil {
-		cfg.respondWithError(w, http.StatusInternalServerError, "could not get all chirps")
+		return allChirpsFormatted, err
 	}
 	for _, chirp := range allChirpsRaw {
 		formattedChirp := databaseChirpToChirp(chirp)
 		allChirpsFormatted = append(allChirpsFormatted, formattedChirp)
 	}
-	cfg.respondWithJSON(w, http.StatusOK, allChirpsFormatted)
+	return allChirpsFormatted, err
 
+}
+func (cfg *apiConfig) GetChirpsByAuthor(w http.ResponseWriter, r *http.Request, author_id string) ([]chirp, error) {
+	var formattedChirps []chirp
+	to_uuid, err := uuid.Parse(author_id)
+	if err != nil {
+		return formattedChirps, err
+	}
+
+	rawChirps, err := cfg.dbQueries.GetChirpsByAuthor(r.Context(), to_uuid)
+	for _, chirp := range rawChirps {
+		formattedChirp := databaseChirpToChirp(chirp)
+		formattedChirps = append(formattedChirps, formattedChirp)
+	}
+	return formattedChirps, nil
 }
 func (cfg *apiConfig) GetChirp(w http.ResponseWriter, r *http.Request) {
 	id, err := uuid.Parse(r.PathValue("chirpID"))
@@ -488,7 +503,29 @@ func main() {
 	mux.HandleFunc("GET /admin/metrics", apiConfig.AdminMetrics)
 	mux.HandleFunc("POST /admin/reset", apiConfig.ResetMetrics)
 	mux.HandleFunc("POST /api/chirps", apiConfig.CreateChirp)
-	mux.HandleFunc("GET /api/chirps", apiConfig.GetAllChirps)
+	mux.HandleFunc("GET /api/chirps", func(w http.ResponseWriter, r *http.Request) {
+		s := r.URL.Query().Get("author_id")
+		var chirps []chirp
+		if s == "" {
+			chirps, err = apiConfig.GetAllChirps(w, r)
+			if err != nil {
+				apiConfig.respondWithErrorSpecific(w, http.StatusInternalServerError, "error retrieving chirps", err)
+			}
+		} else {
+			chirps, err = apiConfig.GetChirpsByAuthor(w, r, s)
+			if err != nil {
+				apiConfig.respondWithErrorSpecific(w, http.StatusInternalServerError, "error retrieving chirps", err)
+			}
+		}
+		order_by := r.URL.Query().Get("sort")
+		if order_by == "desc" {
+			sort.Slice(chirps, func(i, j int) bool {
+				return chirps[j].CreatedAt.Before(chirps[i].CreatedAt)
+			})
+		}
+		apiConfig.respondWithJSON(w, http.StatusOK, chirps)
+
+	})
 	mux.HandleFunc("GET /api/chirps/{chirpID}", apiConfig.GetChirp)
 	mux.HandleFunc("DELETE /api/chirps/{chirpID}", apiConfig.DeleteChirp)
 	mux.HandleFunc("GET /api/healthz", func(w http.ResponseWriter, r *http.Request) {
